@@ -68,6 +68,7 @@ def create_mock_agent(name: str) -> MagicMock:
     agent.command = name
     agent.is_available.return_value = True
     agent.is_running.return_value = True
+    agent.stop.side_effect = lambda *a, **kw: setattr(agent.is_running, "return_value", False)
     agent.get_pid.return_value = 1000 + len(name)
     return agent
 

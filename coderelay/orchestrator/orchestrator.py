@@ -20,6 +20,7 @@ from coderelay.orchestrator.approval import ApprovalHandler
 from coderelay.orchestrator.handoff import (
     HandoffInterface,
     HandoffRequest,
+    HandoffService,
     Phase5AHandoffInitiator,
 )
 from coderelay.orchestrator.state import (
@@ -245,19 +246,34 @@ class Orchestrator:
 
         if decision.approved:
             self.context.state = OrchestratorState.HANDOFF_INITIATED
-            self.handoff_initiator.initiate_handoff(
-                HandoffRequest(
-                    from_agent=self.primary_agent_name,
-                    to_agent=self.secondary_agent_name,
-                    workspace_path=self.workspace_path,
-                    reason=reason,
-                )
+            handoff_req = HandoffRequest(
+                from_agent=self.primary_agent_name,
+                to_agent=self.secondary_agent_name,
+                workspace_path=self.workspace_path,
+                reason=reason,
             )
-            # Switch agents
-            self.agent_manager.stop_agent(self.workspace_path)
-            self.agent_manager.start_agent(self.secondary_agent_name, self.workspace_path)
-            self.context.active_agent_name = self.secondary_agent_name
-            self.context.state = OrchestratorState.ACTIVE
+            try:
+                self.handoff_initiator.initiate_handoff(handoff_req)
+            except Exception:
+                active_owner = self.agent_manager.get_active_owner(self.workspace_path)
+                if active_owner is not None and active_owner.is_alive():
+                    self.context.active_agent_name = active_owner.agent_name
+                    self.context.state = OrchestratorState.ACTIVE
+                else:
+                    self.context.active_agent_name = None
+                    self.context.state = OrchestratorState.STOPPED
+                raise
+
+            # Backward compatibility for Phase 5A initiator; in Phase 5B HandoffService,
+            # outgoing agent is stopped and Antigravity is not launched.
+            if isinstance(self.handoff_initiator, Phase5AHandoffInitiator):
+                self.agent_manager.stop_agent(self.workspace_path)
+                self.agent_manager.start_agent(self.secondary_agent_name, self.workspace_path)
+                self.context.active_agent_name = self.secondary_agent_name
+                self.context.state = OrchestratorState.ACTIVE
+            else:
+                self.context.active_agent_name = None
+                self.context.state = OrchestratorState.HANDOFF_INITIATED
         else:
             self.context.declined_threshold = threshold
             self.context.state = prev_state
@@ -306,20 +322,36 @@ class Orchestrator:
         self.context.last_decision = decision
 
         if decision.approved:
+            prev_state = self.context.state
             self.context.state = OrchestratorState.HANDOFF_INITIATED
-            self.handoff_initiator.initiate_handoff(
-                HandoffRequest(
-                    from_agent=current_agent,
-                    to_agent=destination,
-                    workspace_path=self.workspace_path,
-                    reason=decision.reason,
-                )
+            handoff_req = HandoffRequest(
+                from_agent=current_agent,
+                to_agent=destination,
+                workspace_path=self.workspace_path,
+                reason=decision.reason,
             )
-            # Stop current agent and start destination
-            self.agent_manager.stop_agent(self.workspace_path)
-            self.agent_manager.start_agent(destination, self.workspace_path)
-            self.context.active_agent_name = destination
-            self.context.state = OrchestratorState.ACTIVE
+            try:
+                self.handoff_initiator.initiate_handoff(handoff_req)
+            except Exception:
+                active_owner = self.agent_manager.get_active_owner(self.workspace_path)
+                if active_owner is not None and active_owner.is_alive():
+                    self.context.active_agent_name = active_owner.agent_name
+                    self.context.state = OrchestratorState.ACTIVE
+                else:
+                    self.context.active_agent_name = None
+                    self.context.state = OrchestratorState.STOPPED
+                raise
+
+            # Backward compatibility for Phase 5A initiator; in Phase 5B HandoffService,
+            # outgoing agent is stopped and Antigravity is not launched.
+            if isinstance(self.handoff_initiator, Phase5AHandoffInitiator):
+                self.agent_manager.stop_agent(self.workspace_path)
+                self.agent_manager.start_agent(destination, self.workspace_path)
+                self.context.active_agent_name = destination
+                self.context.state = OrchestratorState.ACTIVE
+            else:
+                self.context.active_agent_name = None
+                self.context.state = OrchestratorState.HANDOFF_INITIATED
         else:
             # Leave active agent running
             self.context.state = OrchestratorState.ACTIVE

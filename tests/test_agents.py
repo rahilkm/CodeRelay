@@ -217,6 +217,7 @@ def test_agent_manager_start_and_stop(tmp_path: Path):
     mock_agent.command = "codex"
     mock_agent.is_available.return_value = True
     mock_agent.is_running.return_value = True
+    mock_agent.stop.side_effect = lambda *a, **kw: setattr(mock_agent.is_running, "return_value", False)
     mock_agent.get_pid.return_value = 8888
     mock_agent.get_executable_path.return_value = "C:\\fake\\codex.cmd"
     reg.register(mock_agent)

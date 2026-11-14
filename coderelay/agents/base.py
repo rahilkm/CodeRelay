@@ -72,6 +72,10 @@ class BaseAgent(ABC):
         """Return captured output from stdout and stderr."""
         ...
 
+    def send_input(self, text: str) -> bool:
+        """Send input text to the running agent process standard input."""
+        return False
+
 
 class SubprocessAgent(BaseAgent):
     """Common subprocess-based implementation for CLI coding agents."""
@@ -199,6 +203,18 @@ class SubprocessAgent(BaseAgent):
 
     def get_output(self) -> str:
         return "".join(self._output_lines)
+
+    def send_input(self, text: str) -> bool:
+        """Send input text to the running agent process standard input."""
+        with self._lock:
+            if self._process is not None and self._process.stdin is not None and self.is_running():
+                try:
+                    self._process.stdin.write(text + "\n")
+                    self._process.stdin.flush()
+                    return True
+                except Exception:
+                    return False
+            return False
 
     def stop(self, timeout: float = 3.0) -> None:
         """Stop the agent process and clean up its process tree."""

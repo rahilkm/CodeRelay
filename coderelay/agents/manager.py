@@ -88,7 +88,8 @@ class AgentManager:
     def stop_agent(self, workspace: Path, timeout: float = 3.0) -> bool:
         """Stop the active agent in the workspace and release ownership.
 
-        Returns True if an agent was stopped, False if no active agent was present.
+        Returns True if an agent was confirmed stopped and ownership was released,
+        False if no active agent was present or if process termination failed.
         """
         resolved_workspace = workspace.expanduser().resolve()
         owner = self.workspace_manager.get_active_owner(resolved_workspace)
@@ -107,6 +108,18 @@ class AgentManager:
                     capture_output=True,
                     check=False,
                 )
+
+        # Confirm process is terminated before releasing workspace ownership
+        if owner.is_alive():
+            logger.error(
+                "Process for agent '%s' (PID: %s) in workspace '%s' failed to terminate within %ss. "
+                "Workspace ownership and lockfile are retained.",
+                owner.agent_name,
+                owner.pid,
+                resolved_workspace,
+                timeout,
+            )
+            return False
 
         self.workspace_manager.release_ownership(resolved_workspace)
         return True

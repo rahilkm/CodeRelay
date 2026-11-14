@@ -41,6 +41,8 @@ PROTECTED_PATTERNS = [
     "auth.json",
     "credentials.json",
     "client_secret*.json",
+    "coderelay.json",
+    "*coderelay.json",
 ]
 
 
@@ -382,3 +384,28 @@ def verify_remote_commit(repo_path: Path, remote: str = "origin", branch: Option
         return False
 
     return local_head.stdout == remote_head.stdout
+
+
+def verify_remote_file(
+    repo_path: Path,
+    filename: str,
+    remote: str = "origin",
+    branch: Optional[str] = None,
+) -> bool:
+    """Verify that a specific file exists on the remote branch and matches local HEAD."""
+    root = ensure_git_repo(repo_path)
+    target_branch = branch or get_current_branch(root)
+
+    # Fetch latest remote references
+    fetch_remote(root, remote)
+
+    local_blob = run_git(["rev-parse", f"HEAD:{filename}"], cwd=root)
+    if not local_blob.success:
+        return False
+
+    remote_blob = run_git(["rev-parse", f"{remote}/{target_branch}:{filename}"], cwd=root)
+    if not remote_blob.success:
+        return False
+
+    return bool(local_blob.stdout and local_blob.stdout == remote_blob.stdout)
+

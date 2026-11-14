@@ -117,4 +117,41 @@ class NoActiveAgentError(OrchestratorError):
     """Raised when an operation requires an active agent but none is running."""
 
 
+class HandoffError(OrchestratorError):
+    """Base exception for handoff workflow errors."""
+
+
+class HandoffTaskCompletionError(HandoffError):
+    """Raised when the outgoing agent fails to finish its current operation."""
+
+
+class HandoffContextError(HandoffError):
+    """Raised when CODERELAY_CONTEXT.md is missing or invalid during handoff."""
+
+
+class HandoffTestFailureError(HandoffError):
+    """Raised when required tests fail during handoff verification."""
+
+
+class HandoffGitStateError(HandoffError):
+    """Raised when Git working tree is in an unsafe state (conflicts, protected files)."""
+
+
+class HandoffCommitError(HandoffError):
+    """Raised when creating the handoff commit fails."""
+
+
+class HandoffPushError(HandoffError):
+    """Raised when pushing the handoff commit to remote fails."""
+
+
+class HandoffVerificationError(HandoffError):
+    """Raised when remote verification of commit or context file fails."""
+
+
+class HandoffProcessShutdownError(HandoffError):
+    """Raised when the outgoing agent process fails to stop cleanly."""
+
+
+
 
