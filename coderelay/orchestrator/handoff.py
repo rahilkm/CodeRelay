@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -112,7 +113,7 @@ def default_test_runner(workspace: Path) -> tuple[bool, str]:
     """Execute pytest in the workspace to verify test suite passes."""
     try:
         proc = subprocess.run(
-            ["pytest", "-q"],
+            [sys.executable, "-m", "pytest", "-q"],
             cwd=str(workspace.resolve()),
             capture_output=True,
             text=True,
@@ -316,11 +317,13 @@ class HandoffService(HandoffInterface):
                     f"Outgoing agent '{request.from_agent}' failed or declined task completion."
                 )
         else:
-            if agent is not None and agent.is_running():
+            owner = self.agent_manager.get_active_owner(workspace) if self.agent_manager else None
+            is_active = (agent is not None and agent.is_running()) or (owner is not None and owner.is_alive())
+            if is_active:
                 raise HandoffTaskCompletionError(
                     f"Cannot establish reliable communication with active agent '{request.from_agent}'. "
                     "Interactive Codex sessions do not support reliable stdin completion signals. "
-                    "Handoff requires a supported communication handler."
+                    "Handoff requires a supported communication handler or user confirmation."
                 )
 
     def _verify_context_file(self, workspace: Path) -> None:

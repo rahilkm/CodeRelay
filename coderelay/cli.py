@@ -46,7 +46,12 @@ from coderelay.git import (
     is_git_repo,
 )
 from coderelay.monitor import UsageMonitor
-from coderelay.orchestrator import Orchestrator, OrchestratorState
+from coderelay.orchestrator import (
+    ApprovalHandler,
+    HandoffService,
+    Orchestrator,
+    OrchestratorState,
+)
 from coderelay.projects import ProjectRegistry
 from coderelay.sync import GitSyncService, SyncStatus
 from coderelay.usage_models import ThresholdEvent, ThresholdLevel, UsageSnapshot
@@ -363,9 +368,21 @@ def orchestrator_switch(
         raise typer.Exit(code=1)
 
     try:
+        agent_manager = _get_agent_manager(config_path)
+        approval_handler = ApprovalHandler()
+        handoff_service = HandoffService(
+            agent_manager=agent_manager,
+            task_completion_handler=approval_handler.create_task_completion_handler(
+                agent_manager.workspace_manager
+            ),
+            auto_launch_incoming=True,
+        )
         orchestrator = Orchestrator(
             config=config,
             project_name_or_path=project,
+            agent_manager=agent_manager,
+            approval_handler=approval_handler,
+            handoff_initiator=handoff_service,
         )
         decision = orchestrator.request_manual_switch(target_agent=to_agent)
 

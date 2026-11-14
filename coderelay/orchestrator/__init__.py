@@ -1,6 +1,10 @@
 """CodeRelay Orchestrator module."""
 
-from coderelay.orchestrator.approval import ApprovalHandler, default_cli_confirm
+from coderelay.orchestrator.approval import (
+    ApprovalHandler,
+    cli_task_completion_confirm,
+    default_cli_confirm,
+)
 from coderelay.orchestrator.handoff import (
     ANTIGRAVITY_CONTINUATION_INSTRUCTION,
     HandoffInterface,
@@ -29,6 +33,7 @@ __all__ = [
     "Phase5AHandoffInitiator",
     "Phase5BHandoffService",
     "SwitchDecision",
+    "cli_task_completion_confirm",
     "default_cli_confirm",
     "default_test_runner",
 ]

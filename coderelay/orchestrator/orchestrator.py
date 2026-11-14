@@ -51,7 +51,13 @@ class Orchestrator:
         self.project_registry = project_registry or ProjectRegistry()
         self.agent_manager = agent_manager or AgentManager()
         self.approval_handler = approval_handler or ApprovalHandler()
-        self.handoff_initiator = handoff_initiator or Phase5AHandoffInitiator()
+        self.handoff_initiator = handoff_initiator or HandoffService(
+            agent_manager=self.agent_manager,
+            task_completion_handler=self.approval_handler.create_task_completion_handler(
+                self.agent_manager.workspace_manager
+            ),
+            auto_launch_incoming=True,
+        )
 
         # Resolve project and workspace
         self.project_name, self.workspace_path = self._resolve_project_and_workspace(

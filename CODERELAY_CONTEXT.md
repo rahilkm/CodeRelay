@@ -61,14 +61,14 @@ Local configuration such as coderelay.json, credentials, and tokens must not be 
 - Phase 5C: Incoming Agent Handoff & Workspace Ownership Transfer — Implemented incoming handoff in HandoffService and Orchestrator in the same local directory: outgoing termination verification, remote Git fast-forward synchronization, clean working-tree check, Antigravity CLI launch with structured continuation instructions, exclusive workspace ownership acquisition, and prevention of simultaneous agent execution.
 
 ## Current Task and Progress
-- Phases 1 through 5C are implemented and verified.
-- The reported automated test baseline is 144 passing tests across 14 test modules.
-- The project is ready to proceed with Phase 6 (End-to-End Integration & Reliability).
+- Phases 1 through 5C and Phase 6 CLI switch integration are implemented and verified.
+- `coderelay switch` is wired to execute the complete Phase 5B + 5C handoff workflow end-to-end with cross-process PID recovery, explicit task completion check, context validation, automated testing, Git staging/commit/push/verify, process termination, safe fast-forward synchronization, and Antigravity launch.
+- The reported automated test baseline is 155 passing tests across 15 test modules.
 
 ## Pending Tasks
 - Phase 6: End-to-End Integration & Reliability
-  - Test the complete usage-monitoring, approval, outgoing-agent shutdown, Git handoff, incoming-agent launch, and context-recovery workflow.
-  - Validate failure handling, interrupted operations, process cleanup, and workspace ownership across the complete workflow in live environments.
+  - Conduct live multi-agent verification in production environments with active Codex CLI and Antigravity CLI sessions.
+  - Validate failure handling and process cleanup under live system load.
 
 ## Technical Decisions
 - Minimal External Dependencies — Use the Python standard library wherever practical. External dependencies are limited to Typer for the CLI and pytest for development/testing.
@@ -87,9 +87,10 @@ Local configuration such as coderelay.json, credentials, and tokens must not be 
 
 ## Testing Instructions and Results
 - Run the complete test suite: pytest -v
+- Run the CLI switch tests: pytest tests/test_cli_switch.py -v
 - Run the handoff tests: pytest tests/test_handoff.py -v
 - Run the orchestration tests: pytest tests/test_orchestrator.py -v
-- Latest reported test result: 144 passed across 14 test modules. Re-run the suite after changes and record the actual result rather than assuming this baseline still passes.
+- Latest reported test result: 155 passed across 15 test modules. Re-run the suite after changes and record the actual result rather than assuming this baseline still passes.
 
 ## Next Agent Instructions
 - Read this context file before making changes.

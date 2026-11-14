@@ -108,6 +108,13 @@ class AgentManager:
                     capture_output=True,
                     check=False,
                 )
+            else:
+                import os
+                import signal
+                try:
+                    os.kill(owner.pid, signal.SIGTERM)
+                except OSError:
+                    pass
 
         # Confirm process is terminated before releasing workspace ownership
         if owner.is_alive():
