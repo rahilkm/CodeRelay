@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -255,6 +256,103 @@ def test_cli_git_commands(tmp_path: Path):
         res_sync = runner.invoke(app, ["git", "sync", "-w", str(tmp_path)])
         assert res_sync.exit_code == 0
         assert "Already up to date" in res_sync.output
+
+
+def test_cli_start_command(tmp_path: Path):
+    cfg_file = tmp_path / "coderelay.json"
+    cfg_file.write_text(json.dumps({"workspace": {"path": str(tmp_path)}}), encoding="utf-8")
+
+    with patch("coderelay.cli.Orchestrator") as mock_orch_cls:
+        mock_orch = MagicMock()
+        mock_orch.project_name = "TestProject"
+        mock_orch.workspace_path = tmp_path
+        mock_orch.context.current_usage_percent = 45.0
+        mock_orch.context.active_agent_name = "codex"
+        mock_orch.context.state.value = "active"
+        mock_orch_cls.return_value = mock_orch
+
+        result = runner.invoke(app, ["start", "TestProject", "-c", str(cfg_file), "-i", "Fix bugs"])
+        assert result.exit_code == 0
+        assert "CodeRelay Orchestrator Started" in result.output
+        assert "Project          : TestProject" in result.output
+        assert "Active Agent     : codex" in result.output
+        mock_orch.startup.assert_called_once_with(instruction="Fix bugs")
+
+
+def test_cli_start_command_error(tmp_path: Path):
+    from coderelay.exceptions import ProjectNotFoundError
+
+    cfg_file = tmp_path / "coderelay.json"
+    cfg_file.write_text(json.dumps({"workspace": {"path": str(tmp_path)}}), encoding="utf-8")
+
+    with patch("coderelay.cli.Orchestrator", side_effect=ProjectNotFoundError("Project missing")):
+        result = runner.invoke(app, ["start", "BadProject", "-c", str(cfg_file)])
+        assert result.exit_code == 1
+        assert "Orchestration startup error: Project missing" in result.output or "Orchestration startup error: Project missing" in result.stderr
+
+
+def test_cli_switch_command_approved(tmp_path: Path):
+    from coderelay.orchestrator.state import SwitchDecision
+
+    cfg_file = tmp_path / "coderelay.json"
+    cfg_file.write_text(json.dumps({"workspace": {"path": str(tmp_path)}}), encoding="utf-8")
+
+    with patch("coderelay.cli.Orchestrator") as mock_orch_cls:
+        mock_orch = MagicMock()
+        mock_decision = SwitchDecision(
+            from_agent="codex",
+            to_agent="antigravity",
+            approved=True,
+            timestamp=MagicMock(),
+            reason="Manual switch",
+        )
+        mock_orch.request_manual_switch.return_value = mock_decision
+        mock_orch_cls.return_value = mock_orch
+
+        result = runner.invoke(app, ["switch", "--to", "antigravity", "-c", str(cfg_file)])
+        assert result.exit_code == 0
+        assert "Switched active agent from 'codex' to 'antigravity'" in result.output
+        mock_orch.request_manual_switch.assert_called_once_with(target_agent="antigravity")
+
+
+def test_cli_switch_command_declined(tmp_path: Path):
+    from coderelay.orchestrator.state import SwitchDecision
+
+    cfg_file = tmp_path / "coderelay.json"
+    cfg_file.write_text(json.dumps({"workspace": {"path": str(tmp_path)}}), encoding="utf-8")
+
+    with patch("coderelay.cli.Orchestrator") as mock_orch_cls:
+        mock_orch = MagicMock()
+        mock_decision = SwitchDecision(
+            from_agent="codex",
+            to_agent="antigravity",
+            approved=False,
+            timestamp=MagicMock(),
+            reason="Manual switch",
+        )
+        mock_orch.request_manual_switch.return_value = mock_decision
+        mock_orch_cls.return_value = mock_orch
+
+        result = runner.invoke(app, ["switch", "-c", str(cfg_file)])
+        assert result.exit_code == 0
+        assert "Switch declined. Active agent remains 'codex'" in result.output
+
+
+def test_cli_switch_no_active_agent(tmp_path: Path):
+    from coderelay.exceptions import NoActiveAgentError
+
+    cfg_file = tmp_path / "coderelay.json"
+    cfg_file.write_text(json.dumps({"workspace": {"path": str(tmp_path)}}), encoding="utf-8")
+
+    with patch("coderelay.cli.Orchestrator") as mock_orch_cls:
+        mock_orch = MagicMock()
+        mock_orch.request_manual_switch.side_effect = NoActiveAgentError("No active agent running")
+        mock_orch_cls.return_value = mock_orch
+
+        result = runner.invoke(app, ["switch", "-c", str(cfg_file)])
+        assert result.exit_code == 1
+        assert "Switch error: No active agent running" in result.output or "Switch error: No active agent running" in result.stderr
+
 
 
 

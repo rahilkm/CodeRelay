@@ -109,3 +109,12 @@ class ContextValidationError(ContextError):
     """Raised when CODERELAY_CONTEXT.md fails schema or required section validation."""
 
 
+class OrchestratorError(CodeRelayError):
+    """Base exception for orchestration engine errors."""
+
+
+class NoActiveAgentError(OrchestratorError):
+    """Raised when an operation requires an active agent but none is running."""
+
+
+

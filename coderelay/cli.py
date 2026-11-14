@@ -32,8 +32,11 @@ from coderelay.exceptions import (
     GitError,
     GitSyncError,
     MergeConflictError,
+    NoActiveAgentError,
     NotAGitRepositoryError,
+    OrchestratorError,
     ProjectError,
+    ProjectNotFoundError,
     UnsafeSyncError,
     WorkspaceOccupiedError,
 )
@@ -43,6 +46,7 @@ from coderelay.git import (
     is_git_repo,
 )
 from coderelay.monitor import UsageMonitor
+from coderelay.orchestrator import Orchestrator, OrchestratorState
 from coderelay.projects import ProjectRegistry
 from coderelay.sync import GitSyncService, SyncStatus
 from coderelay.usage_models import ThresholdEvent, ThresholdLevel, UsageSnapshot
@@ -276,6 +280,112 @@ def monitor(
         typer.secho(f"Monitor error: {e}", fg=typer.colors.RED, err=True)
         monitor_svc.stop()
         raise typer.Exit(code=1)
+
+
+# ----------------------------------------------------------------------
+# Orchestration Commands
+# ----------------------------------------------------------------------
+
+
+@app.command(name="start")
+def orchestrator_start(
+    project: Optional[str] = typer.Argument(
+        None,
+        help="Optional registered project name or directory path. Defaults to configured project.",
+    ),
+    instruction: Optional[str] = typer.Option(
+        None,
+        "--instruction",
+        "-i",
+        help="Optional initial instruction for the active agent.",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to coderelay configuration file.",
+    ),
+) -> None:
+    """Start CodeRelay orchestration for a project: inspects usage and launches active agent."""
+    try:
+        config, _ = load_config(config_path)
+    except ConfigError as err:
+        typer.secho(f"Configuration error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        orchestrator = Orchestrator(
+            config=config,
+            project_name_or_path=project,
+        )
+        orchestrator.startup(instruction=instruction)
+
+        typer.echo("")
+        typer.secho("=== CodeRelay Orchestrator Started ===", fg=typer.colors.GREEN, bold=True)
+        typer.echo(f"  Project          : {orchestrator.project_name}")
+        typer.echo(f"  Workspace        : {orchestrator.workspace_path}")
+        typer.echo(f"  Codex Usage      : {orchestrator.context.current_usage_percent:.1f}%")
+        typer.echo(f"  Active Agent     : {orchestrator.context.active_agent_name}")
+        typer.echo(f"  Status           : {orchestrator.context.state.value}")
+    except (ProjectNotFoundError, WorkspaceOccupiedError, AgentError, OrchestratorError) as err:
+        typer.secho(f"Orchestration startup error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as err:
+        typer.secho(f"Unexpected error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command(name="switch")
+def orchestrator_switch(
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Optional project name or path.",
+    ),
+    to_agent: Optional[str] = typer.Option(
+        None,
+        "--to",
+        help="Target agent to switch to (e.g. 'antigravity', 'codex').",
+    ),
+    config_path: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to coderelay configuration file.",
+    ),
+) -> None:
+    """Manually request user-approved switching of the active coding agent."""
+    try:
+        config, _ = load_config(config_path)
+    except ConfigError as err:
+        typer.secho(f"Configuration error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        orchestrator = Orchestrator(
+            config=config,
+            project_name_or_path=project,
+        )
+        decision = orchestrator.request_manual_switch(target_agent=to_agent)
+
+        if decision.approved:
+            typer.secho(
+                f"\n[Success] Switched active agent from '{decision.from_agent}' to '{decision.to_agent}'.",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.echo(
+                f"\n[Notice] Switch declined. Active agent remains '{decision.from_agent}'."
+            )
+    except (NoActiveAgentError, ProjectNotFoundError, AgentError, OrchestratorError) as err:
+        typer.secho(f"Switch error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as err:
+        typer.secho(f"Unexpected error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
 
 
 # ----------------------------------------------------------------------
