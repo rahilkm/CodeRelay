@@ -265,10 +265,13 @@ class Orchestrator:
                 raise
 
             # Backward compatibility for Phase 5A initiator; in Phase 5B HandoffService,
-            # outgoing agent is stopped and Antigravity is not launched.
+            # outgoing agent is stopped and Antigravity is not launched unless auto_launch_incoming is True.
             if isinstance(self.handoff_initiator, Phase5AHandoffInitiator):
                 self.agent_manager.stop_agent(self.workspace_path)
                 self.agent_manager.start_agent(self.secondary_agent_name, self.workspace_path)
+                self.context.active_agent_name = self.secondary_agent_name
+                self.context.state = OrchestratorState.ACTIVE
+            elif isinstance(self.handoff_initiator, HandoffService) and self.handoff_initiator.auto_launch_incoming:
                 self.context.active_agent_name = self.secondary_agent_name
                 self.context.state = OrchestratorState.ACTIVE
             else:
@@ -343,10 +346,13 @@ class Orchestrator:
                 raise
 
             # Backward compatibility for Phase 5A initiator; in Phase 5B HandoffService,
-            # outgoing agent is stopped and Antigravity is not launched.
+            # outgoing agent is stopped and Antigravity is not launched unless auto_launch_incoming is True.
             if isinstance(self.handoff_initiator, Phase5AHandoffInitiator):
                 self.agent_manager.stop_agent(self.workspace_path)
                 self.agent_manager.start_agent(destination, self.workspace_path)
+                self.context.active_agent_name = destination
+                self.context.state = OrchestratorState.ACTIVE
+            elif isinstance(self.handoff_initiator, HandoffService) and self.handoff_initiator.auto_launch_incoming:
                 self.context.active_agent_name = destination
                 self.context.state = OrchestratorState.ACTIVE
             else:
@@ -357,6 +363,39 @@ class Orchestrator:
             self.context.state = OrchestratorState.ACTIVE
 
         return decision
+
+    def execute_incoming_handoff(
+        self,
+        request: Optional[HandoffRequest] = None,
+        instruction: Optional[str] = None,
+    ) -> BaseAgent:
+        """Execute Phase 5C incoming handoff to safely launch and transfer ownership to incoming agent."""
+        if not hasattr(self.handoff_initiator, "execute_incoming_handoff"):
+            raise OrchestratorError(
+                f"Configured handoff initiator ({type(self.handoff_initiator).__name__}) does not support incoming handoff."
+            )
+
+        req = request or HandoffRequest(
+            from_agent=self.context.active_agent_name or self.primary_agent_name,
+            to_agent=self.secondary_agent_name,
+            workspace_path=self.workspace_path,
+            reason="Orchestrator incoming handoff execution",
+        )
+
+        try:
+            agent = self.handoff_initiator.execute_incoming_handoff(req, instruction=instruction)
+            self.context.active_agent_name = req.to_agent
+            self.context.state = OrchestratorState.ACTIVE
+            return agent
+        except Exception:
+            active_owner = self.agent_manager.get_active_owner(self.workspace_path)
+            if active_owner is not None and active_owner.is_alive():
+                self.context.active_agent_name = active_owner.agent_name
+                self.context.state = OrchestratorState.ACTIVE
+            else:
+                self.context.active_agent_name = None
+                self.context.state = OrchestratorState.STOPPED
+            raise
 
     def shutdown(self) -> None:
         """Stop monitor and update state cleanly."""

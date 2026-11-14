@@ -1,10 +1,13 @@
-CodeRelay — CodeRelay Context
-Project Overview
+# CodeRelay — CodeRelay Context
+
+## Project Overview
 CodeRelay is a local Windows application that orchestrates multiple AI coding agents (OpenAI Codex CLI as primary, Google Antigravity CLI as fallback) on a shared local project workspace. It independently monitors Codex account rate limits and usage via the Codex App Server JSON-RPC interface, evaluates usage thresholds (90% recommendation, 95% critical), requests explicit user approval before transferring control, and coordinates safe task handoff between agents.
-Repository Information
+
+## Repository Information
 - Repository URL: https://github.com/rahilkm/CodeRelay.git
 - Default Branch: main
-Tech Stack and Frameworks
+
+## Tech Stack and Frameworks
 - Python 3.14+ (standard library emphasized: subprocess, dataclasses, json, pathlib, threading, logging)
 - Windows OS (native process management and CMD/PowerShell execution where necessary)
 - Typer >= 0.12.0 (CLI framework)
@@ -12,7 +15,8 @@ Tech Stack and Frameworks
 - Antigravity CLI (agy) (secondary/fallback coding agent)
 - Git CLI (local Git operations, status inspection, fast-forward synchronization, credential-manager integration)
 - pytest >= 8.0.0 (development and automated testing)
-Project Architecture
+
+## Project Architecture
 CodeRelay is organized into four modular subsystems:
 1. Codex Usage Monitoring
    - coderelay.process: Codex CLI executable discovery and Windows process-management helpers.
@@ -31,12 +35,13 @@ CodeRelay is organized into four modular subsystems:
    - coderelay.context: CODERELAY_CONTEXT.md generation, section-level parsing/updating, and validation.
    - coderelay.git: Git CLI abstraction for repository status, branch tracking, uncommitted-change inspection, conflict detection, and secret-file exclusion.
    - coderelay.sync: GitSyncService providing safe, fast-forward-only repository synchronization with remote tracking branches.
-4. Orchestration Engine (Phase 5A)
-   - coderelay.orchestrator.orchestrator: Central Orchestrator coordinating startup, initial usage polling, threshold evaluation, user approval, and agent-transition decisions.
+4. Orchestration Engine & Handoff Pipeline (Phases 5A, 5B, 5C)
+   - coderelay.orchestrator.orchestrator: Central Orchestrator coordinating startup, initial usage polling, threshold evaluation, user approval, agent-transition decisions, and incoming handoff execution.
    - coderelay.orchestrator.state: In-memory OrchestrationContext tracking active agent, current usage percentage, threshold notifications, and user decisions without persistent execution-history files.
    - coderelay.orchestrator.approval: ApprovalHandler presenting switch recommendations and capturing explicit user confirmation.
-   - coderelay.orchestrator.handoff: HandoffInterface and HandoffRequest defining the boundary for the later handoff execution pipeline.
-Important Directories and Files
+   - coderelay.orchestrator.handoff: HandoffService implementing Phase 5B outgoing agent handoff (task completion verification, context check, test runner, isolated selective staging, Git commit/push, remote verification, process termination) and Phase 5C incoming agent handoff (workspace vacancy verification, remote Git fast-forward synchronization, clean working-tree check, Antigravity launch with continuation instructions, and exclusive workspace ownership confirmation).
+
+## Important Directories and Files
 - coderelay/ — Main Python package containing CLI, configuration, monitoring, agents, Git integration, context management, and orchestration.
 - coderelay.example.json — Example configuration template defining workspace path, agent parameters, and monitoring thresholds.
 - codex_usage_test.py — Proof-of-concept script used to verify Codex CLI discovery and App Server JSON-RPC usage retrieval.
@@ -45,56 +50,51 @@ Important Directories and Files
 - requirements.txt — Project runtime and development dependencies.
 - tests/ — Automated tests covering implemented modules.
 Local configuration such as coderelay.json, credentials, and tokens must not be included in committed documentation or handoff context.
-Completed Tasks
+
+## Completed Tasks
 - Phase 1: Project Setup & Core CLI Foundations — Established project structure, typed configuration loading and validation (coderelay/config.py), base exception hierarchy (coderelay/exceptions.py), and CLI status commands (coderelay/cli.py).
 - Phase 2: Persistent Codex Usage Monitor — Implemented Codex CLI discovery, Windows process-management helpers, JSON-RPC 2.0 communication over pipes, usage and rate-limit parsing, threshold detection (90% recommendation and 95% critical) with duplicate suppression and usage-drop resets, and the persistent UsageMonitor service (coderelay monitor). The monitor was tested against the installed Codex App Server.
 - Phase 3: Agent Integration Layer — Implemented the common BaseAgent abstraction, CodexAgent, AntigravityAgent, thread-safe in-memory WorkspaceManager for exclusive workspace ownership, and AgentManager lifecycle coordination.
 - Phase 4: Project Context & Git Integration — Implemented ProjectRegistry for existing repositories and GitHub clones, CODERELAY_CONTEXT.md generation and section-level operations, safe Git CLI operations with secret-file protection, and GitSyncService for fast-forward-only synchronization.
-- Phase 5A: Central Orchestration Engine — Implemented the Orchestrator, startup usage evaluation before agent launch, 90%/95% switching recommendations with duplicate suppression, manual switching workflow (coderelay switch), CLI-based explicit user approval (ApprovalHandler), and the HandoffInterface / HandoffRequest boundary. Phase 5A has a reported test baseline of 116 passing tests.
-Current Task and Progress
-- Phase 5A is implemented.
-- The reported automated test baseline is 116 passing tests.
-- The project is ready to proceed with Phase 5B after the Phase 5A changes and this context file are reviewed, committed, and pushed.
-Pending Tasks
-- Phase 5B: Outgoing Agent Task Completion & Remote Handoff Preparation
-  - When a handoff is approved, stop assigning new work to the outgoing Codex agent and request completion of its current operation.
-  - Instruct Codex to update CODERELAY_CONTEXT.md with completed work, current progress, and the next pending task.
-  - Have Codex run the relevant tests and review its changes.
-  - Inspect the intended changes, exclude secrets and local-only configuration, then create a descriptive handoff commit and push it to the configured remote.
-  - Independently verify that the expected commit and updated context file are present on the remote.
-  - Confirm that the outgoing Codex process has stopped before proceeding.
-  - If commit, push, or remote verification fails, retain the workspace and do not launch the incoming agent.
-- Phase 5C: Incoming Agent Launch & Context Recovery
-  - Safely synchronize the shared local workspace with the verified remote state using fast-forward-only Git operations.
-  - Launch Antigravity in the same local project directory; do not create a second clone.
-  - Instruct Antigravity to read CODERELAY_CONTEXT.md, inspect the repository and Git state, verify the reported progress, and continue with the next pending task.
-  - Verify that Antigravity has successfully recovered the project context and can continue work.
+- Phase 5A: Central Orchestration Engine — Implemented the Orchestrator, startup usage evaluation before agent launch, 90%/95% switching recommendations with duplicate suppression, manual switching workflow (coderelay switch), CLI-based explicit user approval (ApprovalHandler), and the HandoffInterface / HandoffRequest boundary.
+- Phase 5B: Outgoing Agent Handoff Execution — Implemented HandoffService for verified task completion, CODERELAY_CONTEXT.md validation, automated test verification, selective isolated Git staging without blind staging of user modifications, commit and push to remote, remote verification, and confirmed process termination before releasing workspace ownership.
+- Phase 5C: Incoming Agent Handoff & Workspace Ownership Transfer — Implemented incoming handoff in HandoffService and Orchestrator in the same local directory: outgoing termination verification, remote Git fast-forward synchronization, clean working-tree check, Antigravity CLI launch with structured continuation instructions, exclusive workspace ownership acquisition, and prevention of simultaneous agent execution.
+
+## Current Task and Progress
+- Phases 1 through 5C are implemented and verified.
+- The reported automated test baseline is 144 passing tests across 14 test modules.
+- The project is ready to proceed with Phase 6 (End-to-End Integration & Reliability).
+
+## Pending Tasks
 - Phase 6: End-to-End Integration & Reliability
   - Test the complete usage-monitoring, approval, outgoing-agent shutdown, Git handoff, incoming-agent launch, and context-recovery workflow.
-  - Validate failure handling, interrupted operations, process cleanup, and workspace ownership across the complete workflow.
-Technical Decisions
+  - Validate failure handling, interrupted operations, process cleanup, and workspace ownership across the complete workflow in live environments.
+
+## Technical Decisions
 - Minimal External Dependencies — Use the Python standard library wherever practical. External dependencies are limited to Typer for the CLI and pytest for development/testing.
 - Windows Process Management — Use Windows-compatible executable discovery and process-management mechanisms where required. Process-tree cleanup behavior still requires end-to-end verification.
 - Persistent App Server Reuse — Maintain one persistent Codex App Server JSON-RPC connection across polling cycles rather than spawning a new process for every poll.
 - In-Memory Orchestration State — Do not add a database or persistent execution-history store in V1. Keep runtime orchestration state in memory.
-- Exclusive Workspace Ownership — WorkspaceManager is intended to ensure that only one AI coding agent owns a workspace at a time, using thread-safe locking.
+- Exclusive Workspace Ownership — WorkspaceManager ensures that only one AI coding agent owns a workspace at a time, using thread-safe locking and disk lockfile.
 - Explicit User Approval — Never switch agents automatically. Require explicit user consent; suppress repeated recommendations within the same threshold band.
 - Safe Git Operations — Use Git CLI rather than the GitHub REST API. Use fast-forward-only synchronization, inspect changes before staging, exclude secrets and local configuration, and never use destructive reset or forced-push operations.
 - Shared Workspace — Both agents use the same local project directory. GitHub is the remote synchronization point for handoff; do not maintain separate agent clones.
-Known Issues and Verification Gaps
-- The complete Codex-to-Antigravity handoff workflow has not yet been implemented or verified.
-- Windows process-tree termination and cleanup have not yet been independently verified end to end; do not assume that no orphaned child processes can occur.
-- Remote commit verification, safe workspace synchronization during handoff, and Antigravity context recovery remain pending implementation and end-to-end testing.
-- The reported 116-test suite covers the implemented phases; it does not establish that the pending handoff workflow is reliable.
-Testing Instructions and Results
+
+## Known Issues
+- Interactive Codex CLI IPC — Writing to subprocess stdin does not provide interactive autonomous task completion for the installed Codex CLI; task completion requires a supported completion handler or explicit user mediation.
+- Windows process-tree termination and cleanup have not yet been independently verified end to end in a live environment; do not assume that no orphaned child processes can occur.
+- Live end-to-end multi-agent switching across live rate limits remains to be evaluated under Phase 6.
+
+## Testing Instructions and Results
 - Run the complete test suite: pytest -v
+- Run the handoff tests: pytest tests/test_handoff.py -v
 - Run the orchestration tests: pytest tests/test_orchestrator.py -v
-- Latest reported test result: 116 passed across 14 test modules. Re-run the suite after changes and record the actual result rather than assuming this baseline still passes.
-Next Agent Instructions
+- Latest reported test result: 144 passed across 14 test modules. Re-run the suite after changes and record the actual result rather than assuming this baseline still passes.
+
+## Next Agent Instructions
 - Read this context file before making changes.
 - Verify the current Git branch, working-tree status, and remote configuration before modifying files.
 - Work only on the phase and scope explicitly requested.
-- Implement Phase 5B first; do not start Phase 5C until the outgoing-agent completion, commit/push, remote verification, and shutdown steps are implemented and tested.
 - Preserve the shared-workspace model and require explicit user approval for every agent switch.
 - Never use destructive Git commands, force pushes, or commands that discard uncommitted user changes.
 - Inspect staged changes before committing; do not blindly stage the entire repository.

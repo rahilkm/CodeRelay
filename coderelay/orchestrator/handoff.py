@@ -1,4 +1,4 @@
-"""Handoff execution service for CodeRelay (Phase 5B)."""
+"""Handoff execution service for CodeRelay (Phase 5B & Phase 5C)."""
 
 from __future__ import annotations
 
@@ -14,15 +14,28 @@ from coderelay.agents.base import BaseAgent
 from coderelay.agents.manager import AgentManager
 from coderelay.context import CONTEXT_FILENAME, read_context, validate_context
 from coderelay.exceptions import (
+    AgentError,
+    AgentNotAvailableError,
+    AgentNotFoundError,
+    AgentStartError,
+    GitError,
+    GitSyncError,
     HandoffCommitError,
     HandoffContextError,
     HandoffError,
     HandoffGitStateError,
     HandoffProcessShutdownError,
     HandoffPushError,
+    HandoffSyncError,
     HandoffTaskCompletionError,
     HandoffTestFailureError,
     HandoffVerificationError,
+    IncomingAgentLaunchError,
+    IncomingHandoffError,
+    MergeConflictError,
+    UnsafeSyncError,
+    WorkspaceOccupiedError,
+    WorkspaceOwnershipError,
 )
 from coderelay.git import (
     commit_changes,
@@ -35,8 +48,18 @@ from coderelay.git import (
     verify_remote_commit,
     verify_remote_file,
 )
+from coderelay.sync import GitSyncService, SyncStatus
 
 logger = logging.getLogger(__name__)
+
+ANTIGRAVITY_CONTINUATION_INSTRUCTION = (
+    "CodeRelay Handoff Continuation:\n"
+    "1. Read CODERELAY_CONTEXT.md to inspect previous agent notes, completed work, and pending tasks.\n"
+    "2. Inspect the current Git working tree and recent commits (git status, git log -n 3).\n"
+    "3. Identify completed and pending work in the context file.\n"
+    "4. Verify the previous agent's handoff and test status.\n"
+    "5. Continue only the next pending task. Do not repeat completed tasks."
+)
 
 
 @dataclass(slots=True)
@@ -51,6 +74,7 @@ class HandoffRequest:
     status: str = "initiated"
     commit_hash: Optional[str] = None
     error: Optional[str] = None
+    incoming_pid: Optional[int] = None
 
 
 class HandoffInterface(ABC):
@@ -103,19 +127,27 @@ def default_test_runner(workspace: Path) -> tuple[bool, str]:
 
 
 class HandoffService(HandoffInterface):
-    """Phase 5B Outgoing Agent Handoff Execution Service.
+    """Phase 5B & 5C Handoff Execution Service.
 
-    Executes the approved handoff workflow for the outgoing agent:
-    1. Stops assigning new work to the outgoing agent.
-    2. Requires a verified task completion handler for active interactive agents.
-    3. Independently verifies CODERELAY_CONTEXT.md validity.
-    4. Executes test suite to verify code quality.
-    5. Isolates handoff changes from pre-existing user modifications; rejects protected files.
-    6. Stages safe handoff files and creates a descriptive handoff commit.
-    7. Pushes changes to the remote branch; retains local commit on failure.
-    8. Independently verifies commit and context file exist on remote.
-    9. Confirms outgoing agent process has terminated before releasing workspace ownership.
-    10. On any failure, preserves local workspace and aborts without launching incoming agent.
+    Orchestrates the complete, safe agent transfer in a shared local workspace:
+    - Phase 5B (Outgoing):
+      1. Stops assigning new work to the outgoing agent.
+      2. Requires a verified task completion handler for active interactive agents.
+      3. Independently verifies CODERELAY_CONTEXT.md validity.
+      4. Executes test suite to verify code quality.
+      5. Isolates handoff changes from pre-existing user modifications; rejects protected files.
+      6. Stages safe handoff files and creates a descriptive handoff commit.
+      7. Pushes changes to the remote branch; retains local commit on failure.
+      8. Independently verifies commit and context file exist on remote.
+      9. Confirms outgoing agent process has terminated before releasing workspace ownership.
+      10. On any failure, preserves local workspace and aborts without launching incoming agent.
+    - Phase 5C (Incoming):
+      1. Confirms outgoing agent is fully terminated and workspace ownership is vacant.
+      2. Verifies Git remote and local repository state.
+      3. Synchronizes using safe fast-forward-only Git implementation.
+      4. Verifies no unexpected conflicts or uncommitted changes after sync.
+      5. Launches Antigravity in the same local directory with continuation instructions.
+      6. Confirms Antigravity launched successfully and acquired exclusive workspace ownership.
     """
 
     def __init__(
@@ -127,6 +159,7 @@ class HandoffService(HandoffInterface):
         branch: Optional[str] = None,
         shutdown_timeout: float = 5.0,
         handoff_files: Optional[list[str]] = None,
+        auto_launch_incoming: bool = False,
     ) -> None:
         self.agent_manager = agent_manager
         self.test_runner = test_runner or default_test_runner
@@ -135,14 +168,22 @@ class HandoffService(HandoffInterface):
         self.branch = branch
         self.shutdown_timeout = shutdown_timeout
         self.handoff_files = handoff_files
+        self.auto_launch_incoming = auto_launch_incoming
         self.last_request: Optional[HandoffRequest] = None
 
     def initiate_handoff(self, request: HandoffRequest) -> HandoffRequest:
-        """Execute the complete Phase 5B outgoing agent handoff workflow."""
+        """Execute handoff workflow (outgoing Phase 5B, and incoming Phase 5C if auto_launch_incoming)."""
+        self.execute_outgoing_handoff(request)
+        if self.auto_launch_incoming:
+            self.execute_incoming_handoff(request)
+        return request
+
+    def execute_outgoing_handoff(self, request: HandoffRequest) -> HandoffRequest:
+        """Execute the Phase 5B outgoing agent handoff workflow."""
         self.last_request = request
         workspace = request.workspace_path.expanduser().resolve()
         logger.info(
-            "Executing Phase 5B handoff for outgoing agent '%s' in '%s'",
+            "Executing Phase 5B outgoing handoff for '%s' in '%s'",
             request.from_agent,
             workspace,
         )
@@ -178,17 +219,78 @@ class HandoffService(HandoffInterface):
             self._confirm_process_stopped(active_agent, workspace, request.from_agent)
 
             request.status = "completed"
-            logger.info("Phase 5B handoff completed successfully for '%s'.", request.from_agent)
+            logger.info("Phase 5B outgoing handoff completed successfully for '%s'.", request.from_agent)
             return request
 
         except Exception as err:
-            logger.error("Phase 5B handoff failed: %s", err)
+            logger.error("Phase 5B outgoing handoff failed: %s", err)
             request.status = "failed"
             request.error = str(err)
             if commit_hash:
                 request.commit_hash = commit_hash
-            # Local workspace is preserved without destructive actions
             raise
+
+    def execute_incoming_handoff(
+        self,
+        request: HandoffRequest,
+        instruction: Optional[str] = None,
+    ) -> BaseAgent:
+        """Execute the Phase 5C incoming agent handoff workflow in the same local directory."""
+        self.last_request = request
+        workspace = request.workspace_path.expanduser().resolve()
+        target_agent_name = request.to_agent or "antigravity"
+        logger.info(
+            "Executing Phase 5C incoming handoff to '%s' in workspace '%s'",
+            target_agent_name,
+            workspace,
+        )
+
+        try:
+            # 1. Confirm outgoing agent has fully stopped and released workspace ownership
+            self._verify_workspace_unoccupied(workspace, request.from_agent)
+
+            # 2. Verify Git remote and local repository state
+            ensure_git_repo(workspace)
+
+            # 3. Synchronize using the safe, fast-forward-only Git implementation
+            self._sync_workspace_with_remote(workspace)
+
+            # 4. Abort if the repository has unexpected changes or conflicts after sync
+            self._verify_clean_git_state(workspace)
+
+            # 5. Build concise continuation instruction
+            continuation_prompt = instruction or ANTIGRAVITY_CONTINUATION_INSTRUCTION
+
+            # 6. Launch Antigravity in the existing local project directory
+            agent = self._launch_incoming_agent(workspace, target_agent_name, continuation_prompt)
+
+            # 7. Confirm Antigravity launched successfully and owns the workspace
+            self._confirm_incoming_ownership(workspace, target_agent_name, agent)
+
+            request.incoming_pid = agent.get_pid()
+            request.status = "completed"
+            logger.info(
+                "Phase 5C incoming handoff to '%s' completed successfully (PID: %s)",
+                target_agent_name,
+                agent.get_pid(),
+            )
+            return agent
+
+        except Exception as err:
+            logger.error("Phase 5C incoming handoff failed: %s", err)
+            request.status = "failed"
+            request.error = str(err)
+            raise
+
+    def execute_full_handoff(
+        self,
+        request: HandoffRequest,
+        instruction: Optional[str] = None,
+    ) -> tuple[HandoffRequest, BaseAgent]:
+        """Execute both Phase 5B outgoing handoff and Phase 5C incoming handoff."""
+        self.execute_outgoing_handoff(request)
+        agent = self.execute_incoming_handoff(request, instruction=instruction)
+        return request, agent
 
     def _request_outgoing_agent_completion(
         self,
@@ -214,8 +316,6 @@ class HandoffService(HandoffInterface):
                     f"Outgoing agent '{request.from_agent}' failed or declined task completion."
                 )
         else:
-            # Writing to anonymous subprocess pipe stdin does not reliably communicate
-            # with an interactive Codex session or guarantee completion.
             if agent is not None and agent.is_running():
                 raise HandoffTaskCompletionError(
                     f"Cannot establish reliable communication with active agent '{request.from_agent}'. "
@@ -401,5 +501,148 @@ class HandoffService(HandoffInterface):
                     f"{self.shutdown_timeout}s timeout. Workspace ownership is retained."
                 )
 
+    # ------------------------------------------------------------------
+    # Phase 5C Incoming Agent Handoff Helpers
+    # ------------------------------------------------------------------
 
-Phase5BHandoffService = HandoffService
+    def _verify_workspace_unoccupied(self, workspace: Path, outgoing_agent_name: str) -> None:
+        """Confirm outgoing agent is not running and workspace ownership is vacant."""
+        if not self.agent_manager:
+            return
+
+        active_owner = self.agent_manager.get_active_owner(workspace)
+        if active_owner is not None:
+            if active_owner.is_alive():
+                raise WorkspaceOwnershipError(
+                    f"Cannot proceed with incoming handoff: outgoing agent '{active_owner.agent_name}' "
+                    f"(PID: {active_owner.pid}) is still running in workspace '{workspace}'. "
+                    "Simultaneous agent execution is strictly prohibited. Actionable recovery: "
+                    f"terminate process {active_owner.pid} before retrying."
+                )
+            # Release stale record
+            self.agent_manager.workspace_manager.release_ownership(workspace)
+
+        owner_check = self.agent_manager.get_active_owner(workspace)
+        if owner_check is not None and owner_check.is_alive():
+            raise WorkspaceOwnershipError(
+                f"Workspace ownership is uncertain for '{workspace}'. Actionable recovery: "
+                "verify lockfile and ensure no agent process is running."
+            )
+
+    def _sync_workspace_with_remote(self, workspace: Path) -> None:
+        """Safely synchronize local repository with remote using fast-forward only."""
+        sync_service = GitSyncService(workspace, remote=self.remote)
+        try:
+            res = sync_service.synchronize()
+        except UnsafeSyncError as err:
+            raise HandoffSyncError(
+                f"Git synchronization refused: {err}. Actionable recovery: "
+                "commit or stash uncommitted changes before proceeding with handoff."
+            ) from err
+        except MergeConflictError as err:
+            raise HandoffSyncError(
+                f"Git synchronization failed due to merge conflicts: {err}. Actionable recovery: "
+                "resolve merge conflicts manually."
+            ) from err
+        except (GitSyncError, GitError) as err:
+            raise HandoffSyncError(
+                f"Git synchronization failed: {err}. Actionable recovery: "
+                f"verify remote connection and branch status ('git status', 'git fetch {self.remote}')."
+            ) from err
+
+        if res.status == SyncStatus.NO_REMOTE:
+            raise HandoffSyncError(
+                f"Git synchronization failed: {res.message} Actionable recovery: "
+                f"configure git remote '{self.remote}' before incoming handoff."
+            )
+        elif res.status == SyncStatus.DIVERGED:
+            raise HandoffSyncError(
+                f"Git synchronization failed: {res.message}. Actionable recovery: "
+                "branches have diverged; manual rebase or merge is required."
+            )
+        elif res.status == SyncStatus.CONFLICTS:
+            raise HandoffSyncError(
+                f"Git synchronization failed: {res.message}. Actionable recovery: "
+                "resolve merge conflicts before launching incoming agent."
+            )
+        elif res.status == SyncStatus.UNSAFE_LOCAL_CHANGES:
+            raise HandoffSyncError(
+                f"Git synchronization refused: {res.message}. Actionable recovery: "
+                "clean working tree before incoming handoff."
+            )
+
+    def _verify_clean_git_state(self, workspace: Path) -> None:
+        """Ensure working tree has no unexpected conflicts or uncommitted modifications."""
+        status = get_git_status(workspace)
+        if status.has_conflicts:
+            raise HandoffGitStateError(
+                f"Unexpected merge conflicts detected in {', '.join(status.conflicted_files)}. "
+                "Incoming handoff aborted. Actionable recovery: resolve conflicts before continuing."
+            )
+        if status.has_uncommitted_changes:
+            raise HandoffGitStateError(
+                f"Unexpected uncommitted changes detected ({len(status.staged_files)} staged, "
+                f"{len(status.unstaged_files)} unstaged). Incoming handoff aborted. "
+                "Actionable recovery: stash or commit working tree modifications."
+            )
+
+    def _launch_incoming_agent(
+        self,
+        workspace: Path,
+        target_agent_name: str,
+        continuation_prompt: str,
+    ) -> BaseAgent:
+        """Launch the incoming agent in the local workspace directory."""
+        if not self.agent_manager:
+            raise IncomingAgentLaunchError("Cannot launch incoming agent: AgentManager is not configured.")
+
+        try:
+            agent = self.agent_manager.start_agent(
+                agent_name=target_agent_name,
+                workspace=workspace,
+                instruction=continuation_prompt,
+            )
+            return agent
+        except WorkspaceOccupiedError as err:
+            raise WorkspaceOwnershipError(
+                f"Cannot launch incoming agent: {err}. Actionable recovery: "
+                "ensure no other agent owns the workspace."
+            ) from err
+        except (AgentNotAvailableError, AgentNotFoundError, AgentStartError, AgentError) as err:
+            raise IncomingAgentLaunchError(
+                f"Failed to launch incoming agent '{target_agent_name}': {err}. "
+                f"Actionable recovery: verify executable for '{target_agent_name}' is installed and in PATH."
+            ) from err
+        except Exception as err:
+            raise IncomingAgentLaunchError(
+                f"Unexpected error launching incoming agent '{target_agent_name}': {err}. "
+                f"Actionable recovery: inspect logs and check agent command configuration."
+            ) from err
+
+    def _confirm_incoming_ownership(
+        self,
+        workspace: Path,
+        target_agent_name: str,
+        agent: BaseAgent,
+    ) -> None:
+        """Confirm that the incoming agent is actively running and owns the workspace."""
+        if not agent.is_running():
+            exit_code = agent.get_exit_code()
+            if self.agent_manager:
+                self.agent_manager.workspace_manager.release_ownership(workspace)
+            raise IncomingAgentLaunchError(
+                f"Incoming agent '{target_agent_name}' terminated immediately after launch "
+                f"(exit code: {exit_code}). Output: {agent.get_output()}. "
+                f"Actionable recovery: check agent CLI flags and error output."
+            )
+
+        active_owner = self.agent_manager.get_active_owner(workspace) if self.agent_manager else None
+        if active_owner is None or active_owner.agent_name != target_agent_name or not active_owner.is_alive():
+            raise WorkspaceOwnershipError(
+                f"Incoming agent '{target_agent_name}' is running (PID: {agent.get_pid()}) "
+                f"but failed to acquire verified workspace ownership. "
+                f"Actionable recovery: inspect workspace lockfile."
+            )
+
+
+Phase5BHandoffService = lambda *args, **kwargs: HandoffService(*args, auto_launch_incoming=False, **kwargs)

@@ -153,5 +153,22 @@ class HandoffProcessShutdownError(HandoffError):
     """Raised when the outgoing agent process fails to stop cleanly."""
 
 
+class IncomingHandoffError(HandoffError):
+    """Base exception for incoming agent handoff errors."""
+
+
+class IncomingAgentLaunchError(IncomingHandoffError):
+    """Raised when the incoming agent fails to start or establish workspace ownership."""
+
+
+class WorkspaceOwnershipError(IncomingHandoffError):
+    """Raised when workspace ownership state is occupied, invalid, or uncertain."""
+
+
+class HandoffSyncError(IncomingHandoffError):
+    """Raised when Git synchronization fails or cannot safely proceed during incoming handoff."""
+
+
+
 
 

@@ -2,6 +2,7 @@
 
 from coderelay.orchestrator.approval import ApprovalHandler, default_cli_confirm
 from coderelay.orchestrator.handoff import (
+    ANTIGRAVITY_CONTINUATION_INSTRUCTION,
     HandoffInterface,
     HandoffRequest,
     HandoffService,
@@ -17,6 +18,7 @@ from coderelay.orchestrator.state import (
 )
 
 __all__ = [
+    "ANTIGRAVITY_CONTINUATION_INSTRUCTION",
     "ApprovalHandler",
     "HandoffInterface",
     "HandoffRequest",

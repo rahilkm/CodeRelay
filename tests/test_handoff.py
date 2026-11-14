@@ -18,19 +18,25 @@ from coderelay.exceptions import (
     HandoffGitStateError,
     HandoffProcessShutdownError,
     HandoffPushError,
+    HandoffSyncError,
     HandoffTaskCompletionError,
     HandoffTestFailureError,
     HandoffVerificationError,
+    IncomingAgentLaunchError,
+    IncomingHandoffError,
     WorkspaceOccupiedError,
+    WorkspaceOwnershipError,
 )
 from coderelay.git import GitResult, GitStatus
 from coderelay.orchestrator import (
+    ANTIGRAVITY_CONTINUATION_INSTRUCTION,
     ApprovalHandler,
     HandoffRequest,
     HandoffService,
     Orchestrator,
     OrchestratorState,
 )
+from coderelay.sync import GitSyncService, SyncResult, SyncStatus
 
 
 @pytest.fixture
@@ -821,3 +827,460 @@ def test_orchestrator_error_recovery_maintains_active_state_when_process_alive(
         assert orch.context.state == OrchestratorState.ACTIVE
         assert orch.context.active_agent_name == "codex"
         assert ws_mgr.get_active_owner(mock_workspace) is not None
+
+
+# ----------------------------------------------------------------------
+# Phase 5C Incoming Agent Handoff Tests
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_git_status() -> GitStatus:
+    return GitStatus(
+        current_branch="main",
+        tracking_branch="origin/main",
+        is_clean=True,
+        ahead=0,
+        behind=0,
+        staged_files=[],
+        unstaged_files=[],
+        untracked_files=[],
+        conflicted_files=[],
+    )
+
+
+@pytest.fixture
+def mock_antigravity_agent() -> MagicMock:
+    agent = MagicMock(spec=BaseAgent)
+    agent.name = "antigravity"
+    agent.display_name = "Antigravity CLI"
+    agent.is_available.return_value = True
+    agent.is_running.return_value = True
+    agent.get_pid.return_value = 9999
+    agent.get_exit_code.return_value = None
+    agent.get_output.return_value = "Antigravity session running..."
+
+    def fake_stop(timeout=3.0):
+        agent.is_running.return_value = False
+
+    agent.stop.side_effect = fake_stop
+    return agent
+
+
+def test_incoming_handoff_success(
+    mock_workspace: Path,
+    mock_antigravity_agent: MagicMock,
+    clean_git_status: GitStatus,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    reg = AgentRegistry()
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    service = HandoffService(
+        agent_manager=agent_mgr,
+        remote="origin",
+        branch="main",
+    )
+
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Account usage reached 90.0%",
+    )
+
+    sync_result = SyncResult(
+        status=SyncStatus.SYNCHRONIZED,
+        message="Fast-forwarded to origin/main",
+        current_branch="main",
+        initial_commit="abc1234",
+        synced_commit="def5678",
+    )
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = sync_result
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance), \
+         patch("coderelay.orchestrator.handoff.get_git_status", return_value=clean_git_status):
+
+        launched_agent = service.execute_incoming_handoff(request)
+
+        assert launched_agent == mock_antigravity_agent
+        assert request.status == "completed"
+        assert request.incoming_pid == 9999
+        assert request.error is None
+        mock_antigravity_agent.start.assert_called_once_with(
+            workspace=mock_workspace.resolve(),
+            instruction=ANTIGRAVITY_CONTINUATION_INSTRUCTION,
+        )
+        active_owner = agent_mgr.get_active_owner(mock_workspace)
+        assert active_owner is not None
+        assert active_owner.agent_name == "antigravity"
+        assert active_owner.pid == 9999
+
+
+def test_incoming_handoff_outgoing_agent_still_running_raises(
+    mock_workspace: Path,
+    mock_agent: MagicMock,
+    mock_antigravity_agent: MagicMock,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    reg = AgentRegistry()
+    reg.register(mock_agent)
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    # Codex is still alive and occupies the workspace
+    mock_agent.is_running.return_value = True
+    agent_mgr.workspace_manager.acquire_ownership(mock_workspace, mock_agent)
+
+    service = HandoffService(agent_manager=agent_mgr)
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Account usage switch",
+    )
+
+    with pytest.raises(WorkspaceOwnershipError) as exc_info:
+        service.execute_incoming_handoff(request)
+
+    assert "outgoing agent 'codex'" in str(exc_info.value)
+    assert "Simultaneous agent execution is strictly prohibited" in str(exc_info.value)
+    mock_antigravity_agent.start.assert_not_called()
+    assert request.status == "failed"
+
+
+def test_incoming_handoff_git_sync_diverged_raises(
+    mock_workspace: Path,
+    mock_antigravity_agent: MagicMock,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    reg = AgentRegistry()
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    service = HandoffService(agent_manager=agent_mgr)
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Switch",
+    )
+
+    diverged_result = SyncResult(
+        status=SyncStatus.DIVERGED,
+        message="Branch 'main' has diverged from 'origin/main'",
+        current_branch="main",
+        initial_commit="abc1234",
+    )
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = diverged_result
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance):
+
+        with pytest.raises(HandoffSyncError) as exc_info:
+            service.execute_incoming_handoff(request)
+
+        assert "branches have diverged" in str(exc_info.value)
+        mock_antigravity_agent.start.assert_not_called()
+        assert request.status == "failed"
+
+
+def test_incoming_handoff_dirty_workspace_after_sync_raises(
+    mock_workspace: Path,
+    mock_antigravity_agent: MagicMock,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    reg = AgentRegistry()
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    service = HandoffService(agent_manager=agent_mgr)
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Switch",
+    )
+
+    up_to_date = SyncResult(
+        status=SyncStatus.UP_TO_DATE,
+        message="Up to date",
+        current_branch="main",
+        initial_commit="abc1234",
+    )
+
+    dirty_status = GitStatus(
+        current_branch="main",
+        tracking_branch="origin/main",
+        is_clean=False,
+        ahead=0,
+        behind=0,
+        staged_files=["unexpected.py"],
+        unstaged_files=[],
+        untracked_files=[],
+        conflicted_files=[],
+    )
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = up_to_date
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance), \
+         patch("coderelay.orchestrator.handoff.get_git_status", return_value=dirty_status):
+
+        with pytest.raises(HandoffGitStateError) as exc_info:
+            service.execute_incoming_handoff(request)
+
+        assert "Unexpected uncommitted changes detected" in str(exc_info.value)
+        mock_antigravity_agent.start.assert_not_called()
+        assert request.status == "failed"
+
+
+def test_incoming_handoff_antigravity_immediate_exit_raises(
+    mock_workspace: Path,
+    mock_antigravity_agent: MagicMock,
+    clean_git_status: GitStatus,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    # Simulate agent process crashing or exiting immediately after start
+    mock_antigravity_agent.is_running.return_value = False
+    mock_antigravity_agent.get_exit_code.return_value = 1
+    mock_antigravity_agent.get_output.return_value = "Fatal: Command not supported"
+
+    reg = AgentRegistry()
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    service = HandoffService(agent_manager=agent_mgr)
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Switch",
+    )
+
+    up_to_date = SyncResult(
+        status=SyncStatus.UP_TO_DATE,
+        message="Up to date",
+        current_branch="main",
+        initial_commit="abc1234",
+    )
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = up_to_date
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance), \
+         patch("coderelay.orchestrator.handoff.get_git_status", return_value=clean_git_status):
+
+        with pytest.raises(IncomingAgentLaunchError) as exc_info:
+            service.execute_incoming_handoff(request)
+
+        assert "terminated immediately after launch" in str(exc_info.value)
+        assert "exit code: 1" in str(exc_info.value)
+        # Lockfile must be cleared on immediate exit
+        assert agent_mgr.get_active_owner(mock_workspace) is None
+        assert request.status == "failed"
+
+
+def test_incoming_handoff_continuation_instruction_content():
+    """Verify that continuation instruction strictly requires inspecting context, git state, and continuing next pending task."""
+    assert "CODERELAY_CONTEXT.md" in ANTIGRAVITY_CONTINUATION_INSTRUCTION
+    assert "git status" in ANTIGRAVITY_CONTINUATION_INSTRUCTION
+    assert "git log -n 3" in ANTIGRAVITY_CONTINUATION_INSTRUCTION
+    assert "pending" in ANTIGRAVITY_CONTINUATION_INSTRUCTION.lower()
+
+
+def test_incoming_handoff_prevents_simultaneous_execution(
+    mock_workspace: Path,
+    mock_agent: MagicMock,
+    mock_antigravity_agent: MagicMock,
+    clean_git_status: GitStatus,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    reg = AgentRegistry()
+    reg.register(mock_agent)
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    service = HandoffService(agent_manager=agent_mgr)
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Switch",
+    )
+
+    up_to_date = SyncResult(
+        status=SyncStatus.UP_TO_DATE,
+        message="Up to date",
+        current_branch="main",
+        initial_commit="abc1234",
+    )
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = up_to_date
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance), \
+         patch("coderelay.orchestrator.handoff.get_git_status", return_value=clean_git_status):
+
+        service.execute_incoming_handoff(request)
+
+        # Now Antigravity owns the workspace. Attempting to start Codex must be rejected.
+        with pytest.raises(WorkspaceOccupiedError, match="currently occupied by active agent 'antigravity'"):
+            agent_mgr.start_agent("codex", mock_workspace)
+
+
+def test_full_handoff_execution_end_to_end(
+    mock_workspace: Path,
+    mock_agent: MagicMock,
+    mock_antigravity_agent: MagicMock,
+    handoff_git_status: GitStatus,
+    clean_git_status: GitStatus,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    reg = AgentRegistry()
+    reg.register(mock_agent)
+    reg.register(mock_antigravity_agent)
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+
+    # Start with Codex owning workspace
+    agent_mgr.workspace_manager.acquire_ownership(mock_workspace, mock_agent)
+
+    service = HandoffService(
+        agent_manager=agent_mgr,
+        task_completion_handler=lambda a, w, i: True,
+        test_runner=lambda ws: (True, "All tests passed"),
+        auto_launch_incoming=True,
+    )
+
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Account usage reached 90%",
+    )
+
+    up_to_date = SyncResult(
+        status=SyncStatus.UP_TO_DATE,
+        message="Up to date",
+        current_branch="main",
+        initial_commit="abc1234",
+    )
+
+    # During Phase 5B git status has modified context file; during Phase 5C after commit/sync it is clean
+    git_status_mock = MagicMock(side_effect=[handoff_git_status, clean_git_status])
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = up_to_date
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.get_git_status", git_status_mock), \
+         patch("coderelay.orchestrator.handoff.commit_changes", return_value=GitResult(True, ["commit"], stdout="[main abc1234]")), \
+         patch("coderelay.orchestrator.handoff.push_changes", return_value=GitResult(True, ["push"])), \
+         patch("coderelay.orchestrator.handoff.verify_remote_commit", return_value=True), \
+         patch("coderelay.orchestrator.handoff.verify_remote_file", return_value=True), \
+         patch("coderelay.orchestrator.handoff.run_git", return_value=GitResult(True, ["rev-parse"], stdout="abc1234")), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance):
+
+        result = service.initiate_handoff(request)
+
+        assert result.status == "completed"
+        assert result.commit_hash == "abc1234"
+        assert result.incoming_pid == 9999
+        assert mock_agent.is_running() is False
+        assert mock_antigravity_agent.is_running() is True
+        owner = agent_mgr.get_active_owner(mock_workspace)
+        assert owner is not None
+        assert owner.agent_name == "antigravity"
+
+
+def test_orchestrator_integration_full_switch_to_antigravity(
+    mock_workspace: Path,
+    mock_agent: MagicMock,
+    mock_antigravity_agent: MagicMock,
+    handoff_git_status: GitStatus,
+    clean_git_status: GitStatus,
+):
+    from coderelay.agents.registry import AgentRegistry
+
+    cfg = Config(
+        workspace=WorkspaceConfig(path=mock_workspace),
+        monitoring=MonitoringConfig(interval_seconds=120, recommend_threshold=90.0, critical_threshold=95.0),
+    )
+
+    reg = AgentRegistry()
+    reg.register(mock_agent)
+    reg.register(mock_antigravity_agent)
+
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(registry=reg, workspace_manager=ws_mgr)
+    agent_mgr.workspace_manager.acquire_ownership(mock_workspace, mock_agent)
+
+    handoff_service = HandoffService(
+        agent_manager=agent_mgr,
+        task_completion_handler=lambda a, w, i: True,
+        test_runner=lambda ws: (True, "All tests passed"),
+        auto_launch_incoming=True,
+    )
+
+    approval = ApprovalHandler(confirm_func=lambda prompt: True, output_func=lambda msg: None)
+
+    orch = Orchestrator(
+        config=cfg,
+        project_name_or_path=mock_workspace,
+        agent_manager=agent_mgr,
+        approval_handler=approval,
+        handoff_initiator=handoff_service,
+    )
+
+    up_to_date = SyncResult(
+        status=SyncStatus.UP_TO_DATE,
+        message="Up to date",
+        current_branch="main",
+        initial_commit="abc1234",
+    )
+
+    git_status_mock = MagicMock(side_effect=[handoff_git_status, clean_git_status])
+
+    mock_sync_instance = MagicMock()
+    mock_sync_instance.synchronize.return_value = up_to_date
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.get_git_status", git_status_mock), \
+         patch("coderelay.orchestrator.handoff.commit_changes", return_value=GitResult(True, ["commit"], stdout="[main abc1234]")), \
+         patch("coderelay.orchestrator.handoff.push_changes", return_value=GitResult(True, ["push"])), \
+         patch("coderelay.orchestrator.handoff.verify_remote_commit", return_value=True), \
+         patch("coderelay.orchestrator.handoff.verify_remote_file", return_value=True), \
+         patch("coderelay.orchestrator.handoff.run_git", return_value=GitResult(True, ["rev-parse"], stdout="abc1234")), \
+         patch("coderelay.orchestrator.handoff.GitSyncService", return_value=mock_sync_instance):
+
+        decision = orch.request_manual_switch(target_agent="antigravity")
+
+        assert decision.approved is True
+        assert orch.context.state == OrchestratorState.ACTIVE
+        assert orch.context.active_agent_name == "antigravity"
+        assert mock_agent.is_running() is False
+        assert mock_antigravity_agent.is_running() is True
+
