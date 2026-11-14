@@ -1,0 +1,23 @@
+{
+  "workspace": {
+    "path": ".",
+    "context_file": "CODERELAY_CONTEXT.md"
+  },
+  "monitoring": {
+    "interval_seconds": 120,
+    "recommend_threshold": 90.0,
+    "critical_threshold": 95.0
+  },
+  "agents": {
+    "primary": {
+      "name": "codex",
+      "command": "codex",
+      "enabled": true
+    },
+    "secondary": {
+      "name": "antigravity",
+      "command": "agy",
+      "enabled": true
+    }
+  }
+}
