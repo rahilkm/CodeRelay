@@ -1284,3 +1284,88 @@ def test_orchestrator_integration_full_switch_to_antigravity(
         assert mock_agent.is_running() is False
         assert mock_antigravity_agent.is_running() is True
 
+
+def test_default_test_runner_no_discoverable_tests(tmp_path: Path):
+    """When a workspace has no test files, default_test_runner skips tests successfully."""
+    from coderelay.orchestrator.handoff import default_test_runner
+
+    # Create workspace with only non-test code
+    (tmp_path / "app.py").write_text("print('hello')", encoding="utf-8")
+
+    success, message = default_test_runner(tmp_path)
+    assert success is True
+    assert message == "Tests skipped — no test suite found"
+
+
+def test_default_test_runner_pytest_exit_code_5(tmp_path: Path):
+    """When pytest exits with code 5 (no tests collected), default_test_runner treats it as skipped."""
+    from coderelay.orchestrator.handoff import default_test_runner
+
+    # Create a test file with no test functions
+    (tmp_path / "test_empty.py").write_text("# empty test file\nx = 1\n", encoding="utf-8")
+
+    success, message = default_test_runner(tmp_path)
+    assert success is True
+    assert message == "Tests skipped — no test suite found"
+
+
+def test_default_test_runner_real_passing_and_failing_tests(tmp_path: Path):
+    """When tests exist, actual passes succeed and actual failures block."""
+    from coderelay.orchestrator.handoff import default_test_runner
+
+    # Passing test
+    test_file = tmp_path / "test_feature.py"
+    test_file.write_text("def test_ok(): assert True\n", encoding="utf-8")
+
+    success, output = default_test_runner(tmp_path)
+    assert success is True
+    assert "1 passed" in output
+
+    # Failing test
+    test_file.write_text("def test_fail(): assert False\n", encoding="utf-8")
+
+    success, output = default_test_runner(tmp_path)
+    assert success is False
+    assert "1 failed" in output
+
+
+def test_handoff_succeeds_without_test_suite(
+    mock_workspace: Path,
+    mock_agent: MagicMock,
+    clean_git_status: GitStatus,
+):
+    """Phase 5B outgoing handoff succeeds when project has no test suite."""
+    from coderelay.orchestrator.handoff import default_test_runner
+
+    ws_mgr = WorkspaceManager()
+    agent_mgr = AgentManager(workspace_manager=ws_mgr)
+    ws_mgr.acquire_ownership(mock_workspace, mock_agent)
+
+    service = HandoffService(
+        agent_manager=agent_mgr,
+        task_completion_handler=lambda agent, ws, instr: True,
+        test_runner=default_test_runner,
+        remote="origin",
+        branch="main",
+    )
+
+    request = HandoffRequest(
+        from_agent="codex",
+        to_agent="antigravity",
+        workspace_path=mock_workspace,
+        reason="Account usage threshold reached",
+    )
+
+    with patch("coderelay.orchestrator.handoff.ensure_git_repo", return_value=mock_workspace), \
+         patch("coderelay.orchestrator.handoff.get_git_status", return_value=clean_git_status), \
+         patch("coderelay.orchestrator.handoff.commit_changes", return_value=GitResult(True, ["commit"], stdout="[main abc1234]")), \
+         patch("coderelay.orchestrator.handoff.push_changes", return_value=GitResult(True, ["push"])), \
+         patch("coderelay.orchestrator.handoff.verify_remote_commit", return_value=True), \
+         patch("coderelay.orchestrator.handoff.verify_remote_file", return_value=True), \
+         patch("coderelay.orchestrator.handoff.run_git", return_value=GitResult(True, ["rev-parse"], stdout="abc1234")):
+
+        result = service.execute_outgoing_handoff(request)
+        assert result.status == "completed"
+        assert result.commit_hash == "abc1234"
+
+

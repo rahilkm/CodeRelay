@@ -252,6 +252,10 @@ class Orchestrator:
 
         if decision.approved:
             self.context.state = OrchestratorState.HANDOFF_INITIATED
+            try:
+                self.monitor.stop()
+            except Exception:
+                pass
             handoff_req = HandoffRequest(
                 from_agent=self.primary_agent_name,
                 to_agent=self.secondary_agent_name,

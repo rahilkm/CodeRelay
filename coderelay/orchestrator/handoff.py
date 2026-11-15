@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -109,8 +110,30 @@ class Phase5AHandoffInitiator(HandoffInterface):
         return request
 
 
+def has_discoverable_tests(workspace: Path) -> bool:
+    """Check if the workspace contains discoverable test files."""
+    resolved = workspace.resolve()
+    ignore_dirs = {".git", ".venv", "venv", "node_modules", ".tox", "__pycache__"}
+    try:
+        for root, dirs, files in os.walk(resolved):
+            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+            for f in files:
+                if f.endswith(".py") and (f.startswith("test_") or f.endswith("_test.py")):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def default_test_runner(workspace: Path) -> tuple[bool, str]:
-    """Execute pytest in the workspace to verify test suite passes."""
+    """Execute pytest in the workspace to verify test suite passes.
+
+    If no tests are discoverable or collected, returns (True, "Tests skipped — no test suite found").
+    Actual test failures still return (False, output).
+    """
+    if not has_discoverable_tests(workspace):
+        return True, "Tests skipped — no test suite found"
+
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "-q"],
@@ -122,6 +145,9 @@ def default_test_runner(workspace: Path) -> tuple[bool, str]:
             check=False,
         )
         output = proc.stdout or proc.stderr
+        # Pytest exit code 5 indicates no tests were collected
+        if proc.returncode == 5 or "no tests ran" in output.lower():
+            return True, "Tests skipped — no test suite found"
         return (proc.returncode == 0), output
     except Exception as err:
         return False, str(err)
@@ -161,6 +187,7 @@ class HandoffService(HandoffInterface):
         shutdown_timeout: float = 5.0,
         handoff_files: Optional[list[str]] = None,
         auto_launch_incoming: bool = False,
+        interactive_incoming: bool = False,
     ) -> None:
         self.agent_manager = agent_manager
         self.test_runner = test_runner or default_test_runner
@@ -170,6 +197,7 @@ class HandoffService(HandoffInterface):
         self.shutdown_timeout = shutdown_timeout
         self.handoff_files = handoff_files
         self.auto_launch_incoming = auto_launch_incoming
+        self.interactive_incoming = interactive_incoming
         self.last_request: Optional[HandoffRequest] = None
 
     def initiate_handoff(self, request: HandoffRequest) -> HandoffRequest:
@@ -275,6 +303,15 @@ class HandoffService(HandoffInterface):
                 target_agent_name,
                 agent.get_pid(),
             )
+
+            # 8. If interactive mode is enabled, wait for the agent session to complete in this console
+            if self.interactive_incoming:
+                logger.info("Antigravity interactive session active. Waiting for exit...")
+                agent.wait()
+                if self.agent_manager:
+                    self.agent_manager.workspace_manager.release_ownership(workspace)
+                logger.info("Antigravity interactive session completed. Workspace ownership released.")
+
             return agent
 
         except Exception as err:
@@ -604,6 +641,7 @@ class HandoffService(HandoffInterface):
                 agent_name=target_agent_name,
                 workspace=workspace,
                 instruction=continuation_prompt,
+                interactive=self.interactive_incoming,
             )
             return agent
         except WorkspaceOccupiedError as err:

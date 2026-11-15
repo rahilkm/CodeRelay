@@ -68,6 +68,10 @@ def cli_task_completion_confirm(
         "       - Pending Tasks",
         "       - Next Agent Instructions",
         "    3. The workspace is ready for handoff.",
+        "",
+        "  Warning: The outgoing agent process will be terminated to",
+        "  release workspace ownership. If it does not terminate cleanly,",
+        "  forceful termination will be applied.",
         "=" * 50,
     ]
     for line in lines:

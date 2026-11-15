@@ -52,6 +52,7 @@ from coderelay.orchestrator import (
     Orchestrator,
     OrchestratorState,
 )
+from coderelay.process import find_codex_processes
 from coderelay.projects import ProjectRegistry
 from coderelay.sync import GitSyncService, SyncStatus
 from coderelay.usage_models import ThresholdEvent, ThresholdLevel, UsageSnapshot
@@ -197,6 +198,12 @@ def status(
 
 @app.command(name="monitor")
 def monitor(
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Optional project name or path.",
+    ),
     config_path: Optional[Path] = typer.Option(
         None,
         "--config",
@@ -205,12 +212,89 @@ def monitor(
         exists=False,
     ),
 ) -> None:
-    """Start persistent Codex usage monitor."""
+    """Start persistent Codex usage monitor with automated threshold switching and handoff."""
     try:
         config, _ = load_config(config_path)
     except ConfigError as err:
         typer.secho(f"Configuration error: {err}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+    agent_manager = _get_agent_manager(config_path)
+    approval_handler = ApprovalHandler()
+    handoff_service = HandoffService(
+        agent_manager=agent_manager,
+        task_completion_handler=approval_handler.create_task_completion_handler(
+            agent_manager.workspace_manager
+        ),
+        auto_launch_incoming=True,
+        interactive_incoming=True,
+    )
+    orchestrator = Orchestrator(
+        config=config,
+        project_name_or_path=project,
+        agent_manager=agent_manager,
+        approval_handler=approval_handler,
+        handoff_initiator=handoff_service,
+    )
+
+    workspace_path = orchestrator.workspace_path
+    typer.echo("")
+    typer.secho("=== CodeRelay Usage Monitor ===", fg=typer.colors.CYAN, bold=True)
+    typer.echo(f"  Project          : {orchestrator.project_name}")
+    typer.echo(f"  Workspace        : {workspace_path}")
+
+    # Process association: check existing ownership or discover active Codex process
+    active_owner = agent_manager.get_active_owner(workspace_path)
+    if active_owner is not None and active_owner.is_alive():
+        typer.secho(
+            f"  Active Owner     : '{active_owner.agent_name}' (PID: {active_owner.pid})",
+            fg=typer.colors.GREEN,
+        )
+        orchestrator.context.active_agent_name = active_owner.agent_name
+        orchestrator.context.state = OrchestratorState.ACTIVE
+    else:
+        candidates = find_codex_processes(workspace_path)
+        if len(candidates) == 1:
+            chosen = candidates[0]
+            agent_manager.associate_external_agent("codex", workspace_path, chosen.pid)
+            orchestrator.context.active_agent_name = "codex"
+            orchestrator.context.state = OrchestratorState.ACTIVE
+            typer.secho(
+                f"  Associated Codex : PID {chosen.pid} ({chosen.name})",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        elif len(candidates) > 1:
+            typer.echo(f"\nMultiple Codex processes detected in workspace '{workspace_path}':")
+            for i, c in enumerate(candidates, 1):
+                typer.echo(f"  [{i}] PID: {c.pid:<6} | {c.name:<15} | {c.command_line[:50]}")
+            selection = None
+            while selection is None:
+                ans = typer.prompt(f"Select process to associate [1-{len(candidates)}]", default="1")
+                try:
+                    idx = int(ans) - 1
+                    if 0 <= idx < len(candidates):
+                        selection = candidates[idx]
+                except ValueError:
+                    pass
+            agent_manager.associate_external_agent("codex", workspace_path, selection.pid)
+            orchestrator.context.active_agent_name = "codex"
+            orchestrator.context.state = OrchestratorState.ACTIVE
+            typer.secho(
+                f"  Associated Codex : PID {selection.pid} ({selection.name})",
+                fg=typer.colors.GREEN,
+                bold=True,
+            )
+        else:
+            typer.secho(
+                "  Associated Codex : None detected at startup.",
+                fg=typer.colors.YELLOW,
+            )
+            typer.echo(
+                "  (Start Codex in Terminal 1 using 'codex' to associate for automatic handoff)"
+            )
+            orchestrator.context.active_agent_name = "codex"
+            orchestrator.context.state = OrchestratorState.ACTIVE
 
     def print_snapshot(snapshot: UsageSnapshot) -> None:
         ts_str = snapshot.timestamp.strftime("%Y-%m-%d %H:%M:%S")
@@ -263,16 +347,46 @@ def monitor(
     def print_status_msg(msg: str) -> None:
         typer.echo(f"[Monitor] {msg}")
 
+    monitor_svc: Optional[UsageMonitor] = None
+
+    def on_snapshot_combined(snapshot: UsageSnapshot) -> None:
+        print_snapshot(snapshot)
+
+        # Check late association if no active owner existed yet
+        current_owner = agent_manager.get_active_owner(workspace_path)
+        if current_owner is None:
+            late_candidates = find_codex_processes(workspace_path)
+            if len(late_candidates) == 1:
+                chosen = late_candidates[0]
+                agent_manager.associate_external_agent("codex", workspace_path, chosen.pid)
+                typer.secho(
+                    f"\n[Monitor] Detected and associated active Codex process (PID: {chosen.pid}).",
+                    fg=typer.colors.GREEN,
+                )
+
+        # Evaluate threshold and trigger handoff if reached
+        orchestrator.handle_usage_snapshot(snapshot)
+
+        # If handoff was initiated, stop monitor polling
+        if orchestrator.context.state in (
+            OrchestratorState.HANDOFF_INITIATED,
+            OrchestratorState.STOPPED,
+        ):
+            if monitor_svc is not None:
+                monitor_svc.stop()
+
     monitor_svc = UsageMonitor(
         config=config,
-        on_snapshot=print_snapshot,
+        on_snapshot=on_snapshot_combined,
         on_threshold_event=print_threshold_event,
         on_status_message=print_status_msg,
     )
+    orchestrator.monitor = monitor_svc
 
     def sigint_handler(signum: int, frame: object) -> None:
         typer.echo("\nInterrupt received. Stopping monitor cleanly...")
-        monitor_svc.stop()
+        if monitor_svc:
+            monitor_svc.stop()
 
     signal.signal(signal.SIGINT, sigint_handler)
     signal.signal(signal.SIGTERM, sigint_handler)
@@ -280,10 +394,12 @@ def monitor(
     try:
         monitor_svc.run()
     except KeyboardInterrupt:
-        monitor_svc.stop()
+        if monitor_svc:
+            monitor_svc.stop()
     except Exception as e:
         typer.secho(f"Monitor error: {e}", fg=typer.colors.RED, err=True)
-        monitor_svc.stop()
+        if monitor_svc:
+            monitor_svc.stop()
         raise typer.Exit(code=1)
 
 

@@ -47,11 +47,25 @@ class AgentManager:
             return owner.agent
         return None
 
+    def associate_external_agent(
+        self,
+        agent_name: str,
+        workspace: Path,
+        pid: int,
+    ) -> WorkspaceOwnership:
+        """Associate an externally-launched running process with workspace ownership."""
+        return self.workspace_manager.acquire_external_ownership(
+            workspace=workspace,
+            agent_name=agent_name,
+            pid=pid,
+        )
+
     def start_agent(
         self,
         agent_name: str,
         workspace: Path,
         instruction: Optional[str] = None,
+        interactive: bool = False,
     ) -> BaseAgent:
         """Start an agent in the specified workspace with exclusive workspace ownership."""
         agent = self.registry.get(agent_name)
@@ -74,7 +88,10 @@ class AgentManager:
 
         # Start agent process
         try:
-            agent.start(workspace=resolved_workspace, instruction=instruction)
+            if interactive:
+                agent.start(workspace=resolved_workspace, instruction=instruction, interactive=True)
+            else:
+                agent.start(workspace=resolved_workspace, instruction=instruction)
             # Acquire exclusive ownership
             self.workspace_manager.acquire_ownership(resolved_workspace, agent)
             return agent

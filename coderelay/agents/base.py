@@ -38,9 +38,18 @@ class BaseAgent(ABC):
         ...
 
     @abstractmethod
-    def start(self, workspace: Path, instruction: str | None = None) -> None:
+    def start(
+        self,
+        workspace: Path,
+        instruction: str | None = None,
+        interactive: bool = False,
+    ) -> None:
         """Launch the agent in the specified workspace with an optional initial instruction."""
         ...
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        """Wait for the agent process to finish, if applicable."""
+        return None
 
     @abstractmethod
     def stop(self, timeout: float = 3.0) -> None:
@@ -90,6 +99,7 @@ class SubprocessAgent(BaseAgent):
         self._start_time: Optional[datetime] = None
         self._output_lines: collections.deque[str] = collections.deque(maxlen=2000)
         self._reader_thread: Optional[threading.Thread] = None
+        self._is_interactive: bool = False
         self._lock = threading.Lock()
 
     def get_executable_path(self) -> str | None:
@@ -108,7 +118,12 @@ class SubprocessAgent(BaseAgent):
         """Construct the launch command string or argument list."""
         ...
 
-    def start(self, workspace: Path, instruction: Optional[str] = None) -> None:
+    def start(
+        self,
+        workspace: Path,
+        instruction: Optional[str] = None,
+        interactive: bool = False,
+    ) -> None:
         """Launch the agent process in the specified workspace."""
         with self._lock:
             if self.is_running():
@@ -125,33 +140,55 @@ class SubprocessAgent(BaseAgent):
                 raise AgentStartError(f"Workspace directory does not exist: {resolved_workspace}")
 
             cmd = self._build_launch_command(executable, resolved_workspace, instruction)
+            self._is_interactive = interactive
 
             try:
-                # On Windows, handling .CMD or console apps cleanly:
-                if isinstance(cmd, str):
-                    self._process = subprocess.Popen(
-                        cmd,
-                        shell=True,
-                        executable=os.environ.get("COMSPEC", "cmd.exe"),
-                        cwd=str(resolved_workspace),
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding="utf-8",
-                        bufsize=1,
-                    )
+                if interactive:
+                    # In interactive mode, inherit stdin, stdout, and stderr from console
+                    if isinstance(cmd, str):
+                        self._process = subprocess.Popen(
+                            cmd,
+                            shell=True,
+                            executable=os.environ.get("COMSPEC", "cmd.exe"),
+                            cwd=str(resolved_workspace),
+                            stdin=None,
+                            stdout=None,
+                            stderr=None,
+                        )
+                    else:
+                        self._process = subprocess.Popen(
+                            cmd,
+                            cwd=str(resolved_workspace),
+                            stdin=None,
+                            stdout=None,
+                            stderr=None,
+                        )
                 else:
-                    self._process = subprocess.Popen(
-                        cmd,
-                        cwd=str(resolved_workspace),
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding="utf-8",
-                        bufsize=1,
-                    )
+                    # On Windows, handling .CMD or console apps cleanly:
+                    if isinstance(cmd, str):
+                        self._process = subprocess.Popen(
+                            cmd,
+                            shell=True,
+                            executable=os.environ.get("COMSPEC", "cmd.exe"),
+                            cwd=str(resolved_workspace),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding="utf-8",
+                            bufsize=1,
+                        )
+                    else:
+                        self._process = subprocess.Popen(
+                            cmd,
+                            cwd=str(resolved_workspace),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding="utf-8",
+                            bufsize=1,
+                        )
             except Exception as err:
                 self._process = None
                 raise AgentStartError(f"Failed to launch '{self.name}': {err}") from err
@@ -167,13 +204,21 @@ class SubprocessAgent(BaseAgent):
             self._start_time = datetime.now(timezone.utc).astimezone()
             self._output_lines.clear()
 
-            # Background thread to capture stdout/stderr
-            self._reader_thread = threading.Thread(
-                target=self._capture_output_loop,
-                name=f"{self.name}-output-reader",
-                daemon=True,
-            )
-            self._reader_thread.start()
+            if not interactive:
+                # Background thread to capture stdout/stderr (only for non-interactive)
+                self._reader_thread = threading.Thread(
+                    target=self._capture_output_loop,
+                    name=f"{self.name}-output-reader",
+                    daemon=True,
+                )
+                self._reader_thread.start()
+
+    def wait(self, timeout: Optional[float] = None) -> Optional[int]:
+        """Wait for the agent process to terminate."""
+        proc = self._process
+        if proc is not None:
+            return proc.wait(timeout=timeout)
+        return None
 
     def _capture_output_loop(self) -> None:
         """Read output lines continuously from process stdout/stderr."""

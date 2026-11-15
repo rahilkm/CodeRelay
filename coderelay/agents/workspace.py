@@ -128,6 +128,36 @@ class WorkspaceManager:
             self._write_lockfile(ownership)
             return ownership
 
+    def acquire_external_ownership(
+        self,
+        workspace: Path,
+        agent_name: str,
+        pid: int,
+    ) -> WorkspaceOwnership:
+        """Acquire or associate workspace ownership for an external running process."""
+        resolved = workspace.expanduser().resolve()
+
+        with self._lock:
+            active_owner = self.get_active_owner(resolved)
+            if active_owner is not None and active_owner.is_alive():
+                if active_owner.pid == pid and active_owner.agent_name == agent_name:
+                    return active_owner
+                raise WorkspaceOccupiedError(
+                    f"Workspace '{resolved}' is already occupied by agent '{active_owner.agent_name}' "
+                    f"(PID: {active_owner.pid})."
+                )
+
+            ownership = WorkspaceOwnership(
+                workspace_path=resolved,
+                agent_name=agent_name,
+                pid=pid,
+                acquired_at=datetime.now(timezone.utc).astimezone(),
+                agent=None,
+            )
+            self._ownerships[resolved] = ownership
+            self._write_lockfile(ownership)
+            return ownership
+
     def release_ownership(self, workspace: Path) -> None:
         """Release ownership of the workspace."""
         resolved = workspace.expanduser().resolve()
